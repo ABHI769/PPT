@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Presentation Display</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body, html {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background-color: #000000 !important;
+      user-select: none;
+    }
+    /* Clean slide stage: fills maximum viewport preserving aspect ratio */
+    .audience-viewport {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: #000000;
+      position: relative;
+    }
+    .audience-slide-img {
+      max-width: 100vw;
+      max-height: 100vh;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      box-shadow: 0 0 80px rgba(0,0,0,0.95);
+      user-select: none;
+      -webkit-user-drag: none;
+      pointer-events: none;
+    }
+    .audience-slide-card {
+      width: 100%;
+      max-width: 1400px;
+      aspect-ratio: 16 / 9;
+      background: linear-gradient(145deg, #180c2e 0%, #080312 100%);
+      border: 1px solid rgba(168, 85, 247, 0.28);
+      border-radius: 14px;
+      padding: 60px 80px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      box-shadow: 0 0 60px rgba(0,0,0,0.95), 0 0 30px rgba(147, 51, 234, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      position: relative;
+    }
+    .audience-pill {
+      display: inline-block;
+      align-self: flex-start;
+      padding: 6px 18px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 24px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      box-shadow: 0 4px 14px rgba(124, 58, 237, 0.5);
+    }
+    .audience-title {
+      font-size: 46px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: #ffffff;
+      margin-bottom: 36px;
+      line-height: 1.2;
+      letter-spacing: -0.5px;
+    }
+    .audience-bullets {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .audience-bullets li {
+      font-size: 22px;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      line-height: 1.4;
+    }
+    .audience-bullets li::before {
+      content: "•";
+      color: #c084fc;
+      font-size: 28px;
+    }
+    /* Auto-hiding fullscreen hint */
+    .fs-hint {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      background: linear-gradient(145deg, rgba(30, 30, 40, 0.7) 0%, rgba(12, 12, 16, 0.7) 100%);
+      backdrop-filter: blur(8px);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      padding: 10px 18px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      opacity: 0.85;
+      transition: opacity 0.3s;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+      z-index: 999;
+    }
+  </style>
+</head>
+<body>
+  <!-- 
+    Pure Audience View:
+    Contains ONLY the original PowerPoint slide. No navigation, no logos, no microphone icons, no headers, no footers!
+  -->
+  <div class="audience-viewport">
+    <!-- Original PowerPoint Slide Image -->
+    <img id="audience-slide-img" class="audience-slide-img" src="" alt="Slide Image" style="display: none;">
+
+    <!-- Fallback Text Card if image is missing -->
+    <div id="slide-box" class="audience-slide-card" style="display: none;">
+      <div id="slide-pill" class="audience-pill">SLIDE 01</div>
+      <h1 id="slide-title" class="audience-title">Presentation Slide</h1>
+      <ul id="slide-bullets" class="audience-bullets"></ul>
+    </div>
+
+    <!-- Temporary Fullscreen button that auto-hides after 4s -->
+    <button id="fs-button" class="fs-hint" onclick="toggleFullScreen()">
+      ⛶ Fullscreen
+    </button>
+  </div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const presId = urlParams.get('id') || 'sample_deck';
+    const syncChannel = new BroadcastChannel('python_ppt_sync');
+    let currentPresentation = null;
+    let currentIdx = 0;
+
+    // Image fallback handling
+    const imgEl = document.getElementById('audience-slide-img');
+    const cardEl = document.getElementById('slide-box');
+    imgEl.onerror = () => {
+      imgEl.style.display = 'none';
+      cardEl.style.display = 'flex';
+    };
+
+    // Auto-hide fullscreen hint
+    setTimeout(() => {
+      const btn = document.getElementById('fs-button');
+      if (btn) btn.style.display = 'none';
+    }, 4000);
+
+    function toggleFullScreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+        const btn = document.getElementById('fs-button');
+        if (btn) btn.style.display = 'none';
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+
+    // Render original slide
+    function renderSlide(slide, index) {
+      if (!slide) return;
+      currentIdx = (typeof index === 'number') ? index : currentIdx;
+
+      if (slide.image_url) {
+        imgEl.src = slide.image_url;
+        imgEl.style.display = 'block';
+        cardEl.style.display = 'none';
+      } else {
+        imgEl.style.display = 'none';
+        cardEl.style.display = 'flex';
+      }
+
+      document.getElementById('slide-pill').innerText = `SLIDE 0${slide.number}`;
+      document.getElementById('slide-title').innerText = slide.title || `Slide ${slide.number}`;
+
+      const bulletsContainer = document.getElementById('slide-bullets');
+      bulletsContainer.innerHTML = '';
+      const items = slide.points || (slide.raw_text ? slide.raw_text.split('\n') : []);
+      items.forEach(pt => {
+        if (pt.trim()) {
+          const li = document.createElement('li');
+          li.innerText = pt.trim();
+          bulletsContainer.appendChild(li);
+        }
+      });
+    }
+
+    // Listen for live navigation broadcasts from Presenter HUD
+    syncChannel.onmessage = (event) => {
+      const msg = event.data;
+      if (!msg) return;
+      if (msg.presentationId && msg.presentationId !== presId) return;
+
+      if (msg.type === 'NAVIGATE' && msg.slideData) {
+        if (typeof msg.slideIndex === 'number') {
+          currentIdx = msg.slideIndex;
+        }
+        renderSlide(msg.slideData, currentIdx);
+      }
+    };
+
+    // Initial load: fetch presentation once and request sync
+    fetch(`/api/presentation/${presId}`)
+      .then(res => {
+        if (!res.ok) throw new Error('Presentation not found');
+        return res.json();
+      })
+      .then(pres => {
+        if (pres.error) throw new Error(pres.error);
+        currentPresentation = pres;
+
+        // Check local storage for initial slide state
+        const savedIdx = parseInt(localStorage.getItem('ppt_current_' + presId), 10);
+        if (!isNaN(savedIdx) && savedIdx >= 0 && savedIdx < pres.slides.length) {
+          currentIdx = savedIdx;
+        }
+
+        if (pres.slides && pres.slides.length > 0) {
+          renderSlide(pres.slides[currentIdx], currentIdx);
+        }
+
+        // Request live slide from presenter HUD if active
+        syncChannel.postMessage({
+          type: 'REQUEST_CURRENT_SLIDE',
+          presentationId: presId
+        });
+      })
+      .catch(err => {
+        console.error('Failed to load presentation in audience view:', err);
+      });
+
+    // Keyboard navigation (if audience window is focused)
+    window.addEventListener('keydown', (e) => {
+      if (!currentPresentation || !currentPresentation.slides) return;
+      if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+        if (currentIdx < currentPresentation.slides.length - 1) {
+          currentIdx++;
+          const slide = currentPresentation.slides[currentIdx];
+          renderSlide(slide, currentIdx);
+          localStorage.setItem('ppt_current_' + presId, currentIdx);
+          syncChannel.postMessage({
+            type: 'NAVIGATE',
+            presentationId: presId,
+            slideIndex: currentIdx,
+            slideData: slide
+          });
+        }
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        if (currentIdx > 0) {
+          currentIdx--;
+          const slide = currentPresentation.slides[currentIdx];
+          renderSlide(slide, currentIdx);
+          localStorage.setItem('ppt_current_' + presId, currentIdx);
+          syncChannel.postMessage({
+            type: 'NAVIGATE',
+            presentationId: presId,
+            slideIndex: currentIdx,
+            slideData: slide
+          });
+        }
+      } else if (e.key === 'f' || e.key === 'F') {
+        toggleFullScreen();
+      }
+    });
+  </script>
+</body>
+</html>
