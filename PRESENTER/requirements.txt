@@ -1,4 +1,0 @@
-flask>=3.0.0
-python-pptx>=1.0.0
-pywin32>=306
-Pillow>=10.0.0
