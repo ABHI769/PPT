@@ -363,6 +363,93 @@
       goToSlide(currentSlideIndex + direction);
     }
 
+    // Helper to safely escape HTML characters
+    function escapeHtml(text) {
+      if (!text) return '';
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function escapeRegex(str) {
+      return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // Common English presentation stop words to prevent false triggers
+    const STOP_WORDS = new Set([
+      'the', 'and', 'for', 'that', 'this', 'with', 'from', 'have', 'been',
+      'will', 'would', 'could', 'should', 'about', 'there', 'their', 'they',
+      'what', 'when', 'where', 'which', 'who', 'some', 'more', 'also',
+      'part', 'page', 'slide', 'point', 'points', 'deck', 'talk', 'view',
+      'are', 'was', 'were', 'our', 'you', 'your', 'his', 'her', 'its'
+    ]);
+
+    // Clean slide title by stripping slide/chapter numbering prefixes & extracting segments
+    function extractTitlePhrases(title) {
+      if (!title) return [];
+      let cleaned = title.trim();
+
+      // Remove leading number markers: e.g. "01 / ", "1. ", "Slide 2: ", "02 - "
+      cleaned = cleaned.replace(/^(?:\d+[\s\/\.\-\–\—\:]+|\b(?:slide|page|chapter|section)\s+\d+[\s\/\.\-\–\—\:]*)/i, '').trim();
+
+      const phrases = new Set();
+      if (cleaned.length >= 3 && !STOP_WORDS.has(cleaned.toLowerCase())) {
+        phrases.add(cleaned.toLowerCase());
+      }
+
+      // Split compound titles by separators like "/", "•", "|", "&", "-", ","
+      const segments = cleaned.split(/[\/•|&,\-–—]|\band\b/i);
+      segments.forEach(seg => {
+        const s = seg.trim().toLowerCase();
+        if (s.length >= 3 && !STOP_WORDS.has(s)) {
+          phrases.add(s);
+        }
+      });
+
+      return Array.from(phrases);
+    }
+
+    // Semantic synonyms and topic variants
+    function getTopicVariants(phrase) {
+      const p = phrase.toLowerCase().trim();
+      const variants = [p];
+
+      if (p.includes('tech') || p.includes('technology') || p.includes('stack')) {
+        variants.push('technology stack', 'tech stack', 'technologies used', 'technology used', 'technologies');
+      }
+      if (p.includes('closing') || p.includes('conclusion')) {
+        variants.push('closing', 'conclusion', 'final summary', 'summary', 'wrap up', 'in conclusion');
+      }
+      if (p.includes('intro') || p.includes('introduction')) {
+        variants.push('introduction', 'intro', 'project background', 'overview', 'project overview', 'about the project');
+      }
+      if (p.includes('definition') || p.includes('problem')) {
+        variants.push('project definition', 'problem statement', 'problem', 'challenges', 'definition', 'scope');
+      }
+      if (p.includes('solution') || p.includes('proposed')) {
+        variants.push('proposed solution', 'solution', 'approach', 'our solution');
+      }
+      if (p.includes('design') || p.includes('architecture')) {
+        variants.push('system design', 'system architecture', 'architecture', 'design');
+      }
+      if (p.includes('approach') || p.includes('method') || p.includes('implementation')) {
+        variants.push('technical approach', 'implementation', 'methodology', 'technical method');
+      }
+      if (p.includes('evaluation') || p.includes('result') || p.includes('metric')) {
+        variants.push('evaluation', 'results', 'metrics', 'testing', 'performance');
+      }
+      if (p.includes('environment') || p.includes('development')) {
+        variants.push('development environment', 'dev environment', 'environment');
+      }
+
+      return Array.from(new Set(variants));
+    }
+
+    let lastJumpTime = 0;
+
     // Web Speech API
     let recognition = null;
     function initSpeechRecognition() {
@@ -374,19 +461,33 @@
 
       recognition = new SpeechRecognition();
       recognition.continuous = true;
-      recognition.interimResults = false;
+      recognition.interimResults = true;
       recognition.lang = 'en-US';
 
       recognition.onresult = (event) => {
-        const last = event.results[event.results.length - 1];
-        if (last && last[0]) {
-          const transcript = last[0].transcript.trim();
-          handleCommand(transcript);
+        let interimText = '';
+        let finalText = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i];
+          const text = res[0] ? res[0].transcript : '';
+          if (res.isFinal) {
+            finalText += text;
+          } else {
+            interimText += text;
+          }
+        }
+
+        const currentSpeech = (finalText || interimText || '').trim();
+        if (currentSpeech) {
+          handleCommand(currentSpeech, !!finalText);
         }
       };
 
       recognition.onerror = (e) => {
-        console.warn('Speech recognition notice:', e.error);
+        if (e.error !== 'no-speech') {
+          console.warn('Speech recognition notice:', e.error);
+        }
       };
 
       recognition.onend = () => {
@@ -401,7 +502,7 @@
 
       try {
         recognition.start();
-        document.getElementById('voice-status-text').innerText = 'Listening for slide labels...';
+        document.getElementById('voice-status-text').innerText = 'Listening continuously for presentation speech...';
       } catch (err) {
         console.warn('Speech start notice:', err);
       }
@@ -419,7 +520,7 @@
         label.innerText = 'MIC ACTIVE';
         label.style.color = '#10b981';
         btn.innerText = 'Mute Mic';
-        document.getElementById('voice-status-text').innerText = 'Listening for slide labels...';
+        document.getElementById('voice-status-text').innerText = 'Listening continuously for presentation speech...';
       } else {
         try { recognition?.stop(); } catch (e) {}
         indicator.style.backgroundColor = 'var(--danger)';
@@ -447,119 +548,176 @@
       ambiguityBox.style.display = 'block';
     }
 
-    // Voice & Typed Command Matcher
-    function handleCommand(rawPhrase) {
-      if (!rawPhrase || !presentation) return;
-      let phrase = rawPhrase.toLowerCase().trim();
+    function showMatchFeedback(text) {
       const transcriptBox = document.getElementById('voice-transcript-text');
-      transcriptBox.innerText = `Heard: "${rawPhrase}"`;
-      transcriptBox.style.color = '#fff';
+      if (transcriptBox) {
+        transcriptBox.innerHTML = `<span style="color: #38bdf8; font-weight: 600;">${escapeHtml(text)}</span>`;
+      }
+    }
 
-      // Remove common punctuation
-      phrase = phrase.replace(/[.,?!:;]/g, '').trim();
+    // Voice & Typed Natural Sentence Matcher
+    function handleCommand(rawPhrase, isFinal = true) {
+      if (!rawPhrase || !presentation || !presentation.slides) return;
+      const transcriptBox = document.getElementById('voice-transcript-text');
 
-      // 1. Standard Navigation Commands
-      const nextWords = ['next', 'next slide', 'forward', 'go forward', 'advance', 'advance slide', 'next please', 'move next', 'continue'];
-      if (nextWords.includes(phrase)) {
-        navigateSlide(1);
-        return;
-      }
-      const prevWords = ['previous', 'previous slide', 'prev', 'go back', 'back', 'previous please', 'move back', 'retreat'];
-      if (prevWords.includes(phrase)) {
-        navigateSlide(-1);
-        return;
-      }
-      const firstWords = ['first slide', 'start', 'beginning', 'go to start', 'restart', 'first'];
-      if (firstWords.includes(phrase)) {
-        goToSlide(0);
-        return;
-      }
-      const lastWords = ['last slide', 'end', 'final', 'finish', 'last'];
-      if (lastWords.includes(phrase)) {
-        goToSlide(presentation.slide_count - 1);
+      let phrase = rawPhrase.toLowerCase().trim();
+      phrase = phrase.replace(/[.,?!:;]/g, ' ').replace(/\s+/g, ' ').trim();
+
+      // 1. Navigation Commands inside natural sentences
+      // "next slide", "let's move to the next slide", "go forward", "advance"
+      if (/\b(?:go\s+to|move\s+to|switch\s+to|jump\s+to|navigate\s+to)?\s*(?:the\s+)?(?:next|forward|advance|move\s+on)\s*(?:slide|page)?\b|\b(?:next|forward|advance)\s+slide\b/i.test(phrase)) {
+        if (Date.now() - lastJumpTime > 600) {
+          lastJumpTime = Date.now();
+          navigateSlide(1);
+          showMatchFeedback('▶ Advanced to Next Slide');
+        }
         return;
       }
 
-      // 2. Slide Number or Page Number ("slide 2", "page 3", "slide two", "page four")
-      const slideNumMatch = phrase.match(/(?:slide|page|number)\s+(\w+)/i);
+      // "previous slide", "go back to previous slide", "return to prev"
+      if (/\b(?:go\s+to|move\s+to|switch\s+to|jump\s+to|navigate\s+to)?\s*(?:the\s+)?(?:previous|prev|back|go\s+back|return)\s*(?:slide|page)?\b|\b(?:previous|prev)\s+slide\b/i.test(phrase)) {
+        if (Date.now() - lastJumpTime > 600) {
+          lastJumpTime = Date.now();
+          navigateSlide(-1);
+          showMatchFeedback('◀ Returned to Previous Slide');
+        }
+        return;
+      }
+
+      // First / Start
+      if (/\b(?:go\s+to|move\s+to|back\s+to|return\s+to)?\s*(?:the\s+)?(?:first|beginning|start)\s*(?:slide|page)?\b/i.test(phrase)) {
+        if (Date.now() - lastJumpTime > 600) {
+          lastJumpTime = Date.now();
+          goToSlide(0);
+          showMatchFeedback('⏮ Jumped to First Slide');
+        }
+        return;
+      }
+
+      // Last / End
+      if (/\b(?:go\s+to|jump\s+to|move\s+to)?\s*(?:the\s+)?(?:last|final|end)\s*(?:slide|page)?\b/i.test(phrase)) {
+        if (Date.now() - lastJumpTime > 600) {
+          lastJumpTime = Date.now();
+          goToSlide(presentation.slide_count - 1);
+          showMatchFeedback('⏭ Jumped to Final Slide');
+        }
+        return;
+      }
+
+      // Slide number or Page number ("slide 2", "page 3", "slide two", "page four")
+      const slideNumMatch = phrase.match(/\b(?:slide|page|number)\s+(\d+|\w+)\b/i);
       if (slideNumMatch) {
-        const token = slideNumMatch[1];
+        const token = slideNumMatch[1].toLowerCase();
         let num = parseInt(token, 10);
         if (isNaN(num) && NUMBER_WORDS[token]) {
           num = NUMBER_WORDS[token];
         }
         if (!isNaN(num) && num >= 1 && num <= presentation.slide_count) {
-          goToSlide(num - 1);
+          if (Date.now() - lastJumpTime > 600) {
+            lastJumpTime = Date.now();
+            goToSlide(num - 1);
+            showMatchFeedback(`🔢 Jumped to Slide ${num}`);
+          }
           return;
         }
       }
 
-      // Clean spoken command: strip common presentation command prefixes & suffixes
-      let cleanPhrase = phrase
-        .replace(/^(?:show|open|go to|jump to|navigate to|switch to|display|take me to|please show|please go to)\s+/i, '')
-        .replace(/\s+(?:slide|page|please|now)$/i, '')
-        .trim();
+      // 2. Slide Title & Label Natural Sentence Matching
+      // Catches natural spoken phrases like "in the introduction", "coming to our project definition",
+      // "looking at the technology stack", "now in the system design", "in conclusion"
+      let bestMatch = null;
+      let highestScore = 0;
 
-      if (!cleanPhrase) cleanPhrase = phrase;
-
-      // 3. Exact Label Match (highest priority)
-      const exactMatches = [];
       presentation.slides.forEach((slide) => {
-        const labels = slide.labels || [];
-        for (const lbl of labels) {
-          const l = lbl.toLowerCase().trim();
-          if (l === cleanPhrase || l === phrase) {
-            exactMatches.push(slide);
-            break;
-          }
-        }
-      });
+        const candidateSet = new Set();
 
-      if (exactMatches.length === 1) {
-        goToSlide(exactMatches[0].index);
-        return;
-      } else if (exactMatches.length > 1) {
-        showAmbiguityChoice(exactMatches);
-        return;
-      }
+        // Title and sub-segments of title
+        const titlePhrases = extractTitlePhrases(slide.title);
+        titlePhrases.forEach(p => {
+          candidateSet.add(p);
+          getTopicVariants(p).forEach(v => candidateSet.add(v));
+        });
 
-      // 4. Substring & Word-Boundary Match (min length 3 to prevent noise)
-      if (cleanPhrase.length >= 3) {
-        const matchedSlides = [];
-        presentation.slides.forEach((slide) => {
-          const labels = slide.labels || [];
-          const hasMatch = labels.some((lbl) => {
-            const l = lbl.toLowerCase().trim();
-            return cleanPhrase.includes(l) || (l.length >= 4 && l.includes(cleanPhrase));
-          });
-
-          if (hasMatch) {
-            matchedSlides.push(slide);
+        // Slide labels
+        (slide.labels || []).forEach(lbl => {
+          const l = lbl.trim().toLowerCase();
+          if (l.length >= 3 && !STOP_WORDS.has(l)) {
+            candidateSet.add(l);
+            getTopicVariants(l).forEach(v => candidateSet.add(v));
           }
         });
 
-        if (matchedSlides.length === 1) {
-          goToSlide(matchedSlides[0].index);
-          return;
-        } else if (matchedSlides.length > 1) {
-          showAmbiguityChoice(matchedSlides);
+        candidateSet.forEach(cand => {
+          if (cand.length < 3 || STOP_WORDS.has(cand)) return;
+
+          const candRegex = new RegExp('\\b' + escapeRegex(cand) + '\\b', 'i');
+          if (candRegex.test(phrase)) {
+            // Check if preceded by conversational presentation lead-ins
+            const anchorRegex = new RegExp('(?:^|\\b)(?:in(?:\\s+the)?|in(?:\\s+our)?|coming\\s+to(?:\\s+the)?|coming\\s+to(?:\\s+our)?|moving\\s+(?:on\\s+)?to(?:\\s+the)?|moving\\s+(?:on\\s+)?to(?:\\s+our)?|looking\\s+at(?:\\s+the)?|as\\s+(?:we\\s+see\\s+)?in(?:\\s+the)?|discussing(?:\\s+the)?|regarding(?:\\s+the)?|here\\s+in(?:\\s+the)?|turning\\s+to(?:\\s+the)?|talk\\s+about(?:\\s+the)?|about(?:\\s+the)?)\\s+' + escapeRegex(cand) + '\\b', 'i');
+
+            const hasLeadIn = anchorRegex.test(phrase);
+
+            let score = cand.length * 10;
+            if (cand.includes(' ')) score += 50; // multi-word bonus
+            if (hasLeadIn) score += 150; // conversational lead-in bonus ("in the ...")
+            if (slide.labels && slide.labels.some(l => l.toLowerCase() === cand)) score += 60; // explicit label bonus
+
+            if (score > highestScore) {
+              highestScore = score;
+              bestMatch = {
+                slide: slide,
+                matchedPhrase: cand,
+                hasLeadIn: hasLeadIn,
+                score: score
+              };
+            }
+          }
+        });
+      });
+
+      if (bestMatch && highestScore >= 50) {
+        const targetSlide = bestMatch.slide;
+
+        // If presenter is already on this slide, acknowledge without redundant jump
+        if (targetSlide.index === currentSlideIndex) {
+          transcriptBox.innerHTML = `🗣️ Heard: "${escapeHtml(rawPhrase)}" <span style="color: #a855f7; font-weight: 600;">(Currently on Slide ${targetSlide.number}: ${escapeHtml(targetSlide.title)})</span>`;
           return;
         }
-      }
 
-      // 5. Fallback: match slide title
-      const titleMatches = presentation.slides.filter(s => {
-        const t = (s.title || '').toLowerCase();
-        return t.includes(cleanPhrase) || cleanPhrase.includes(t);
-      });
-      if (titleMatches.length === 1) {
-        goToSlide(titleMatches[0].index);
+        // Debounce jumps to prevent rapid oscillation
+        if (Date.now() - lastJumpTime < 700) {
+          return;
+        }
+
+        lastJumpTime = Date.now();
+        goToSlide(targetSlide.index);
+
+        const detectedPhrase = bestMatch.hasLeadIn
+          ? `in the ${bestMatch.matchedPhrase}`
+          : bestMatch.matchedPhrase;
+
+        transcriptBox.innerHTML = `🎯 Caught: <strong style="color: #c084fc;">"${escapeHtml(detectedPhrase)}"</strong> → Opened Slide ${targetSlide.number}: <strong style="color: #fff;">${escapeHtml(targetSlide.title)}</strong>`;
+        transcriptBox.style.color = '#e2e8f0';
+
+        const badge = document.getElementById('voice-status-text');
+        if (badge) {
+          badge.innerText = `⚡ Jumped to Slide ${targetSlide.number}`;
+          badge.style.color = '#38bdf8';
+          setTimeout(() => {
+            badge.innerText = isListening ? 'Listening continuously for presentation speech...' : 'Microphone muted.';
+            badge.style.color = 'var(--accent-light)';
+          }, 2500);
+        }
         return;
       }
 
       // Feedback for unrecognized speech
-      transcriptBox.innerText = `Heard: "${rawPhrase}" (No matching slide label)`;
-      transcriptBox.style.color = '#94a3b8';
+      if (!isFinal && !bestMatch) {
+        transcriptBox.innerHTML = `<span style="color: #94a3b8; font-style: italic;">Listening: "${escapeHtml(rawPhrase)}..."</span>`;
+      } else if (isFinal) {
+        transcriptBox.innerHTML = `Heard: "${escapeHtml(rawPhrase)}" <span style="color: #64748b;">(No matching slide title)</span>`;
+        transcriptBox.style.color = '#94a3b8';
+      }
     }
 
     function handleTypedCommand(e) {
